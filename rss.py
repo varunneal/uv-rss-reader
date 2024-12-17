@@ -1,23 +1,41 @@
 # /// script
+# requires-python = ">=3.10"
 # dependencies = [
 #   "rich",
 #   "feedparser",
-#   "html2text"
+#   "html2text",
+#   "python-dateutil",
+#   "prompt-toolkit"
 # ]
 # ///
 
-import feedparser
-from datetime import datetime
+import locale
 import textwrap
-from rich.console import Console
-from rich.table import Table
-from rich.text import Text
-from rich.markdown import Markdown
-from rich.prompt import IntPrompt
-import html2text
+from datetime import datetime
 import webbrowser
 import os
 import re
+from math import ceil
+
+import feedparser
+from dateutil import parser
+from rich import box
+from rich.markdown import Markdown
+from rich.prompt import IntPrompt
+from rich.table import Table
+from rich.live import Live
+from rich.console import Console
+from rich.layout import Layout as RichLayout
+from rich.panel import Panel
+from rich.text import Text
+
+import html2text
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+
+locale.setlocale(locale.LC_TIME, '')
+
 
 def slugify(text):
     """Convert text to a URL-friendly slug"""
@@ -26,25 +44,36 @@ def slugify(text):
     text = re.sub(r'[-\s]+', '-', text)
     return text.strip('-')
 
+
+def get_date(article, pretty=False):
+    _date = None
+    if publish_date := article.get('published'):
+        _date = parser.parse(publish_date)
+    elif update_date := article.get('updated'):
+        _date = parser.parse(update_date)
+    elif not pretty:
+        return datetime.now().strftime('%Y-%m-%d')
+
+    if not _date:
+        return "No date"
+    return _date.strftime("%b %-d, %Y")
+
+
 def save_as_markdown(article):
     """Save article content as a markdown file"""
     h = html2text.HTML2Text()
     h.ignore_links = False
-    
-    # Create articles directory if it doesn't exist
+
     if not os.path.exists('articles'):
         os.makedirs('articles')
-    
-    # Generate filename from title
+
     title = article.get('title', 'Untitled')
-    date = article.get('published', datetime.now().strftime('%Y-%m-%d'))
+    date = get_date(article, pretty=False)
     filename = f"articles/{date[:10]}-{slugify(title)}.md"
-    
-    # Get content
+
     content = article.get('content', [{'value': article.get('summary', 'No content available')}])[0]['value']
     markdown_content = h.handle(content)
-    
-    # Create markdown file with frontmatter
+
     with open(filename, 'w', encoding='utf-8') as f:
         f.write('---\n')
         f.write(f'title: "{title}"\n')
@@ -52,105 +81,227 @@ def save_as_markdown(article):
         f.write(f'url: {article.get("link", "")}\n')
         f.write('---\n\n')
         f.write(markdown_content)
-    
+
     return filename
 
-def format_date(date_str):
-    """Convert date string to a more readable format"""
-    try:
-        dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
-        return dt.strftime('%Y-%m-%d %H:%M')
-    except:
-        return date_str
 
 def display_article(article):
-    """Display full article content"""
-    console = Console()
+    """Display full article content with pagination"""
+    console = Console(width=80)
     h = html2text.HTML2Text()
     h.ignore_links = False
-    
-    while True:
-        console.clear()
-        console.print(f"\n[bold blue]{article.get('title', 'No title')}[/bold blue]")
-        console.print(f"[dim]{format_date(article.get('published', 'No date'))}\n[/dim]")
-        
-        # Get and convert content
-        content = article.get('content', [{'value': article.get('summary', 'No content available')}])[0]['value']
-        markdown_content = h.handle(content)
-        
-        # Display content
-        console.print(Markdown(markdown_content))
-        
-        # Show options
-        console.print("\n[bold green]Options:[/bold green]")
-        console.print("1. Open in browser")
-        console.print("2. Save as markdown")
-        console.print("3. Return to list")
-        
-        choice = IntPrompt.ask("Choose an option", choices=["1", "2", "3"], default="3")
-        if choice == 1:
+
+    # Convert content to markdown
+    content = article.get('content', [{'value': article.get('summary', 'No content available')}])[0]['value']
+    markdown_content = h.handle(content)
+    lines = markdown_content.split('\n')
+
+    # Pagination
+    CONTENT_HEIGHT = console.height - 30
+    total_pages = ceil(len(lines) / CONTENT_HEIGHT)
+    current_page = 1
+    session = PromptSession()
+
+    def get_page_content(page_num):
+        """Get content for a specific page"""
+        start_idx = (page_num - 1) * CONTENT_HEIGHT
+        end_idx = start_idx + CONTENT_HEIGHT
+        return '\n'.join(lines[start_idx:end_idx])
+
+    def create_layout():
+        """Create the complete layout with header, content, and footer"""
+        layout = RichLayout()
+
+        # Header
+        header_text = Text()
+        header_text.append(str(console.height) + "_ ")
+        header_text.append(f"{article.get('title', 'No title')}\n", style="bold blue")
+        header_text.append(f"{get_date(article, pretty=True)}\n", style="dim")
+        header = Panel(header_text, border_style="blue")
+
+        # Content
+        content_text = Text(get_page_content(current_page))
+        content_panel = Panel(
+            content_text,
+            title=f"Page {current_page} of {total_pages}",
+            border_style="white"
+        )
+
+        # Footer
+        footer_text = Text()
+        footer_text.append("Navigation:\n", style="bold green")
+        footer_text.append(
+            "j: prev page | k: next page | o: open | s: save | q: quit")
+        footer = Panel(footer_text, border_style="green")
+
+        layout.split(
+            RichLayout(header, size=4),
+            RichLayout(content_panel),
+            RichLayout(footer, size=4)
+        )
+
+        return layout
+
+    def handle_command(command):
+        """Handle user input commands"""
+        nonlocal current_page
+
+        if command == 'q':
+            return False
+        elif command == 'k' and current_page < total_pages:
+            current_page += 1
+        elif command == 'j' and current_page > 1:
+            current_page -= 1
+        elif command == 'o':
             webbrowser.open(article.get('link', ''))
-        elif choice == 2:
+            return True
+        elif command == 's':
             filename = save_as_markdown(article)
             console.print(f"\n[green]Article saved as: {filename}[/green]")
-            input("\nPress Enter to continue...")
-        else:
-            break
+            return False
+
+        return True
+
+    with Live(create_layout(), console=console, screen=True, refresh_per_second=4) as live:
+        while True:
+            # Get user input and clear buffer immediately
+            command = session.prompt().lower().strip()
+
+            result = handle_command(command)
+            if not result:
+                break
+
+            live.update(create_layout())
+
+    return
+
+
+def truncate_text(text, max_width):
+    """Truncate text to fit within max_width, preserving words"""
+    if len(text) <= max_width:
+        return text
+    return text[:max_width - 3] + "..."
 
 def display_feed(feed_url):
-    """Display RSS feed content in a formatted table"""
+    """Display RSS feed content with pagination and fixed layout"""
     console = Console()
-    
-    # Parse the feed
     feed = feedparser.parse(feed_url)
-    
-    while True:
-        console.clear()
-        # Create and style the table
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Date", style="dim", width=4)
-        table.add_column("Title", style="bold", width=10)
-        table.add_column("Summary", width=20)
-        
-        # Add entries to table
-        for idx, entry in enumerate(feed.entries, 1):
-            date = format_date(entry.get('published', 'No date'))
+
+    LINES_PER_ENTRY = 3
+    HEADER_FOOTER_LINES = 8
+    ENTRIES_PER_PAGE = (console.height - HEADER_FOOTER_LINES) // LINES_PER_ENTRY
+
+    total_pages = ceil(len(feed.entries) / ENTRIES_PER_PAGE)
+    current_page = 1
+    session = PromptSession()
+
+    def get_page_entries(page_num):
+        """Get entries for the current page"""
+        start_idx = (page_num - 1) * ENTRIES_PER_PAGE
+        end_idx = start_idx + ENTRIES_PER_PAGE
+        return feed.entries[start_idx:end_idx]
+
+
+    def create_table(entries):
+        """Create table for current page of entries with strictly enforced 3-line height per entry"""
+        table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            padding=(0, 1),
+            box=box.SIMPLE,
+            # show_lines=True
+        )
+
+        table.add_column("#", style="dim")
+        table.add_column("Date", style="dim")
+        table.add_column("Title", style="bold")
+        table.add_column("Summary")
+
+        start_idx = (current_page - 1) * ENTRIES_PER_PAGE + 1
+        for idx, entry in enumerate(entries, start_idx):
+            # Format date
+            date = get_date(entry, pretty=True)
+
             title = entry.get('title', 'No title')
+            title = truncate_text(title, 70)
+
             summary = entry.get('summary', 'No summary')
             summary = summary.replace('<p>', '').replace('</p>', '')
-            summary = textwrap.shorten(summary, width=150, placeholder="...")
-            
-            table.add_row(str(idx), date, title, summary)
-        
-        # Print feed title and table
-        console.print(f"\n[bold blue]{feed.feed.title}[/bold blue]\n")
-        console.print(table)
-        console.print(f"\nTotal entries: [bold green]{len(feed.entries)}[/bold green]")
-        
-        # Show options
-        console.print("\n[bold green]Options:[/bold green]")
-        console.print("Enter article number to read (1-{})".format(len(feed.entries)))
-        console.print("Or enter 'q' to quit")
-        
-        choice = input("\nYour choice: ").lower()
-        if choice == 'q':
-            break
-        try:
-            article_num = int(choice)
+            summary = truncate_text(summary, 120)
+
+            table.add_row(
+                str(idx),
+                date,
+                title,
+                summary
+            )
+
+        table.row_styles = ["", "dim"]  # Alternate styles for better readability
+        return table
+
+    def create_layout():
+        """Create the complete layout with header, content, and footer"""
+        layout = RichLayout()
+
+        header_text = Text()
+        header_text.append(f"{feed.feed.title}\n", style="bold blue")
+        header_text.append(f"Page {current_page} of {total_pages}", style="dim")
+        header = Panel(header_text, border_style="blue")
+
+        current_entries = get_page_entries(current_page)
+        content = Panel(create_table(current_entries), border_style="white")
+
+        footer_text = Text()
+        footer_text.append("Options:\n", style="bold green")
+        footer_text.append(f"Pick article (1-{len(feed.entries)}) | j: prev page | k: next page | q: quit")
+        footer = Panel(footer_text, border_style="green")
+
+        layout.split(
+            RichLayout(header, size=4),
+            RichLayout(content),
+            RichLayout(footer, size=4)
+        )
+        return layout
+
+    def handle_command(command):
+        """Handle user input commands"""
+        nonlocal current_page
+
+        if command == 'q':
+            return False  # Signal to exit
+        elif command == 'k' and current_page < total_pages:
+            current_page += 1
+        elif command == 'j' and current_page > 1:
+            current_page -= 1
+        elif command.isdigit():
+            article_num = int(command)
             if 1 <= article_num <= len(feed.entries):
-                display_article(feed.entries[article_num - 1])
-        except ValueError:
-            continue
+                return ('article', article_num)
+        return True  # Continue running
+
+    with Live(create_layout(), console=console, screen=True, refresh_per_second=4) as live:
+        while True:
+            command = session.prompt().lower().strip()
+
+            result = handle_command(command)
+            if result is False:
+                break
+            elif isinstance(result, tuple) and result[0] == 'article':
+                live.stop()
+                display_article(feed.entries[result[1] - 1])
+                live.start()
+
+            live.update(create_layout())
+    return
+
 
 if __name__ == "__main__":
     import sys
-    
+
     if len(sys.argv) != 2:
         print("Usage: python rss_reader.py <feed_url>")
         sys.exit(1)
-    
+
     feed_url = sys.argv[1]
     display_feed(feed_url)
-
 
