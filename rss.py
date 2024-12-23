@@ -42,13 +42,11 @@ class RSSReader:
         self.entries_cache = []  # Store processed entries
 
     def truncate_text(self, text, max_width):
-        """Truncate text to fit within max_width, preserving words"""
         if len(text) <= max_width:
             return text
         return textwrap.shorten(text, width=max_width, placeholder="…")
 
     def get_date(self, article, pretty=False):
-        """Extract and format date from article"""
         for date_field in ('published', 'updated'):
             if date := article.get(date_field):
                 try:
@@ -77,7 +75,6 @@ class RSSReader:
 
         self.entries_cache = [self.process_entry(entry) for entry in feed.entries]
 
-        # Build pages
         pages, current_page, current_height = [], [], 1
         for entry in self.entries_cache:
             height = max(
@@ -116,15 +113,14 @@ class RSSReader:
                 )
             return table
 
-        cur = 0
-
         def layout():
             header = Text(f"{feed.feed.title}\n", style="bold blue")
             header.append(f"Page {cur + 1} of {len(pages)}", style="white")
             content = Panel(create_table(cur))
-            footer = Text(f"Options:\nPick article (1-{len(self.entries_cache)}) | j: prev | k: next | q: quit")
+            footer = Text(f"Navigation:\nPick article (1-{len(self.entries_cache)}) | j: prev | k: next | q: quit")
             return self.create_layout(header, content, footer)
 
+        cur = 0
         with Live(layout(), console=self.console, screen=True, refresh_per_second=4) as live:
             while True:
                 cmd = self.session.prompt().lower().strip()
@@ -199,18 +195,21 @@ class RSSReader:
             while True:
                 command = self.session.prompt().lower().strip()
 
-                if command == 'q':
-                    break
-                elif command == 'k' and current_page < total_pages:
-                    current_page += 1
-                elif command == 'j' and current_page > 1:
-                    current_page -= 1
-                elif command == 'o':
-                    webbrowser.open(article.get('link', ''))
-                elif command == 's':
-                    filename = self.save_article(article)
-                    self.console.print(f"\n[green]Article saved as: {filename}[/green]")
-                    break
+                match command:
+                    case 'q':
+                        break
+                    case "k":
+                        if current_page < total_pages:
+                            current_page += 1
+                    case "j":
+                        if current_page > 1:
+                            current_page -= 1
+                    case "o":
+                        webbrowser.open(article.get('link', ''))
+                    case "s":
+                        filename = self.save_article(article)
+                        self.console.print(f"\n[green]Article saved as: {filename}[/green]")
+                        break
 
                 live.update(create_current_layout())
 
