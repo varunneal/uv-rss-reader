@@ -3,7 +3,7 @@ Built on top of [feedparser](https://github.com/kurtmckee/feedparser). Run using
 
 Usage:
 
-Clone this and run
+Clone this repo and run
 
 ```
 uv run rss.py <feed_url>

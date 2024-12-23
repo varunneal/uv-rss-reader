@@ -9,6 +9,7 @@
 # ]
 # ///
 
+import html
 import locale
 import os
 import re
@@ -21,7 +22,6 @@ import feedparser
 import html2text
 from dateutil import parser
 from prompt_toolkit import PromptSession
-
 from rich import box
 from rich.console import Console
 from rich.layout import Layout
@@ -39,11 +39,7 @@ class RSSReader:
         self.session = PromptSession()
         self.h2t = html2text.HTML2Text()
         self.h2t.ignore_links = False
-        
-    def calculate_text_lines(self, text, width):
-        """Calculate how many lines a text will occupy given a width"""
-        wrapped_lines = textwrap.wrap(text, width=width)
-        return len(wrapped_lines)
+        self.entries_cache = []  # Store processed entries
 
     def truncate_text(self, text, max_width):
         """Truncate text to fit within max_width, preserving words"""
@@ -62,6 +58,90 @@ class RSSReader:
                     continue
         return "No date" if pretty else datetime.now().strftime('%Y-%m-%d')
 
+    def process_entry(self, entry):
+        """Process a feed entry into a standardized dictionary format"""
+        summary = entry.get('summary', 'No summary').replace('<p>', '').replace('</p>', '')
+        title = entry.get('title', 'No title')
+        return {
+            'original': entry,  # Keep original entry for full article display
+            'date': self.get_date(entry, pretty=True),
+            'title': html.unescape(title),
+            'summary': html.unescape(summary),
+            'truncated_title': self.truncate_text(html.unescape(title), 70),
+            'truncated_summary': self.truncate_text(html.unescape(summary), 120)
+        }
+
+    def display_feed(self, feed_url):
+        feed = feedparser.parse(feed_url)
+        available_height = self.console.height - 10
+
+        self.entries_cache = [self.process_entry(entry) for entry in feed.entries]
+
+        # Build pages
+        pages, current_page, current_height = [], [], 1
+        for entry in self.entries_cache:
+            height = max(
+                len(textwrap.wrap(entry['truncated_title'], width=self.console.width // 4)),
+                len(textwrap.wrap(entry['truncated_summary'], width=self.console.width // 3))
+            )
+            if current_page and current_height + height > available_height:
+                pages.append(current_page)
+                current_page, current_height = [], 1
+            current_page.append(entry)
+            current_height += height
+        if current_page:
+            pages.append(current_page)
+
+        def create_table(page_index):
+            table = Table(
+                show_header=True,
+                header_style="bold magenta",
+                padding=(0, 1),
+                box=box.SIMPLE,
+                style="dim",
+                row_styles=["none", "dim"]
+            )
+            table.add_column("#", style="dim")
+            table.add_column("Date", style="dim")
+            table.add_column("Title", style="bold")
+            table.add_column("Summary")
+
+            start_idx = sum(len(p) for p in pages[:page_index])
+            for i, entry in enumerate(pages[page_index]):
+                table.add_row(
+                    str(i + start_idx + 1),
+                    entry['date'],
+                    entry['truncated_title'],
+                    entry['truncated_summary']
+                )
+            return table
+
+        cur = 0
+
+        def layout():
+            header = Text(f"{feed.feed.title}\n", style="bold blue")
+            header.append(f"Page {cur + 1} of {len(pages)}", style="white")
+            content = Panel(create_table(cur))
+            footer = Text(f"Options:\nPick article (1-{len(self.entries_cache)}) | j: prev | k: next | q: quit")
+            return self.create_layout(header, content, footer)
+
+        with Live(layout(), console=self.console, screen=True, refresh_per_second=4) as live:
+            while True:
+                cmd = self.session.prompt().lower().strip()
+                if cmd == 'q':
+                    break
+                elif cmd == 'k' and cur < len(pages) - 1:
+                    cur += 1
+                elif cmd == 'j' and cur > 0:
+                    cur -= 1
+                elif cmd.isdigit():
+                    n = int(cmd)
+                    if 1 <= n <= len(self.entries_cache):
+                        live.stop()
+                        self.display_article(self.entries_cache[n - 1]['original'])
+                        live.start()
+                live.update(layout())
+
     def save_article(self, article):
         """Save article as markdown file"""
         os.makedirs('articles', exist_ok=True)
@@ -78,7 +158,6 @@ class RSSReader:
 
     @staticmethod
     def slugify(text):
-        """Convert text to URL-friendly slug"""
         text = text.lower()
         return re.sub(r'[-\s]+', '-', re.sub(r'[^\w\s-]', '', text)).strip('-')
 
@@ -97,7 +176,7 @@ class RSSReader:
         content = article.get('content', [{'value': article.get('summary', 'No content')}])[0]['value']
         lines = self.h2t.handle(content).split('\n')
 
-        content_height = self.console.height - 16
+        content_height = self.console.height - 12
         total_pages = ceil(len(lines) / content_height)
         current_page = 1
 
@@ -134,76 +213,6 @@ class RSSReader:
                     break
 
                 live.update(create_current_layout())
-
-    def display_feed(self, feed_url):
-        feed = feedparser.parse(feed_url)
-        MAX_SUMMARY_LENGTH, MAX_TITLE_LENGTH = 120, 70
-        available_height = self.console.height - 10
-        entries = feed.entries
-
-        # Build pages inline
-        pages, current_page, current_height = [], [], 1
-        for entry in entries:
-            summary = entry.get('summary', 'No summary').replace('<p>', '').replace('</p>', '')
-            title = entry.get('title', 'No title')
-            ttitle = self.truncate_text(title, MAX_TITLE_LENGTH)
-            tsum = self.truncate_text(summary, MAX_SUMMARY_LENGTH)
-            height = max(
-                len(textwrap.wrap(ttitle, width=self.console.width // 4)),
-                len(textwrap.wrap(tsum, width=self.console.width // 3))
-            )
-            if current_page and current_height + height > available_height:
-                pages.append(current_page)
-                current_page, current_height = [], 1
-            current_page.append(entry)
-            current_height += height
-        if current_page:
-            pages.append(current_page)
-
-        def create_table(page_index):
-            table = Table(show_header=True, header_style="bold magenta", padding=(0, 1), box=box.SIMPLE)
-            table.add_column("#", style="dim")
-            table.add_column("Date", style="dim")
-            table.add_column("Title", style="bold")
-            table.add_column("Summary")
-            start_idx = sum(len(p) for p in pages[:page_index])
-            for i, e in enumerate(pages[page_index]):
-                t = self.truncate_text(e.get('title', 'No title'), MAX_TITLE_LENGTH)
-                s = self.truncate_text(e.get('summary', 'No summary').replace('<p>', '').replace('</p>', ''),
-                                       MAX_SUMMARY_LENGTH)
-                table.add_row(
-                    str(i + start_idx + 1),
-                    self.get_date(e, pretty=True),
-                    t,
-                    s
-                )
-            return table
-
-        cur = 0
-
-        def layout():
-            header = Text(f"{feed.feed.title}\n", style="bold blue")
-            header.append(f"Page {cur + 1} of {len(pages)}", style="white")
-            content = Panel(create_table(cur))
-            footer = Text(f"Options:\nPick article (1-{len(entries)}) | j: prev | k: next | q: quit")
-            return self.create_layout(header, content, footer)
-
-        with Live(layout(), console=self.console, screen=True, refresh_per_second=4) as live:
-            while True:
-                cmd = self.session.prompt().lower().strip()
-                if cmd == 'q':
-                    break
-                elif cmd == 'k' and cur < len(pages) - 1:
-                    cur += 1
-                elif cmd == 'j' and cur > 0:
-                    cur -= 1
-                elif cmd.isdigit():
-                    n = int(cmd)
-                    if 1 <= n <= len(entries):
-                        live.stop()
-                        self.display_article(entries[n - 1])
-                        live.start()
-                live.update(layout())
 
 
 def main():
