@@ -1,7 +1,16 @@
 [project]
 name = "uv-rss-reader"
 version = "0.1.0"
-description = "Add your description here"
+description = "A terminal RSS reader with rich formatting"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "rich",
+    "feedparser",
+    "html2text",
+    "python-dateutil",
+    "prompt-toolkit",
+]
+
+[project.scripts]
+rss-reader = "rss:main"
